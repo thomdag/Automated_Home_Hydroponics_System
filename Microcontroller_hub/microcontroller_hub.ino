@@ -5,21 +5,29 @@
 #include "DFRobot_PH.h"
 #include "RTClib.h"
 #include <TimeLib.h>
+#include <LiquidCrystal_I2C.h>
 
 // Define core IDs for each task
 #define CORE_TASK1 0
 #define CORE_TASK2 1
 
-// Pin Definitions
-#define PH_SENSOR_PIN A0
-#define TDS_SENSOR_PIN A1
-#define TEMP_SENSOR_PIN A2
+// PIN DEFINITIONS
+// Sensor pins
+#define PH_SENSOR_PIN 27
+#define TDS_SENSOR_PIN 26
+#define TEMP_SENSOR_PIN 25
 
-#define NUTRIENT_RELAY_PIN 7
-#define PH_UP_RELAY_PIN 6
-#define PH_DOWN_RELAY_PIN 5
-#define WATER_RELAY_PIN 4
-#define LIGHT_PIN 3
+// Mosfet pins
+#define PH_SENSOR_FET 19
+#define TDS_SENSOR_FET 18
+#define TEMP_SENSOR_FET 17
+
+// Control Pins
+#define NUTRIENT_RELAY_PIN 23
+#define WATER_RELAY_PIN 33
+#define PH_UP_RELAY_PIN 22
+#define PH_DOWN_RELAY_PIN 32
+#define LIGHT_PIN 21
 
 // Constants for sensor calibration and configuration
 const float PH_UPPER_LIMIT = 6.0;
@@ -38,10 +46,12 @@ OneWire oneWire(TEMP_SENSOR_PIN);
 DallasTemperature tempSensor(&oneWire);
 DFRobot_PH phSensor;
 
-// RTC Object. 
+// RTC object. 
 RTC_DS3231 realTimeClock; // Esp32 has a RTC however lacks a battery.
 DateTime lastModification;
 
+// LCD 16x2 display
+LiquidCrystal_I2C lcd(0x3F, 16, 2);
 
 // Task handles
 TaskHandle_t readSensorTaskHandle;
@@ -79,11 +89,25 @@ void setup() {
     pinMode(PH_SENSOR_PIN, INPUT);
     pinMode(TDS_SENSOR_PIN, INPUT);
     pinMode(TEMP_SENSOR_PIN, INPUT);
+    digitalWrite(PH_SENSOR_PIN, LOW);
+    digitalWrite(TDS_SENSOR_FET, LOW);
+    digitalWrite(TEMP_SENSOR_PIN, LOW);
 
-    // Initialize sensors and communication
+    pinMode(PH_SENSOR_FET, OUTPUT);
+    pinMode(TDS_SENSOR_FET, OUTPUT);
+    pinMode(TEMP_SENSOR_FET, OUTPUT);
+
+
+    // Initialise sensors and communication
     Wire.begin();
     tempSensor.begin();
     phSensor.begin();
+
+    // Lcd initialise
+    lcd.init();
+    lcd.backlight();
+    lcd.setCursor(0, 0);
+    lcd.print("Starting")
 
     // Create tasks
     mutexSharedVars = xSemaphoreCreateMutex();
@@ -106,19 +130,30 @@ void loop() {
 
 }
 
-void readSensorTask() {
+void readSensorTask(void* pvParameters) {
     while (1) {
         // Read temperature sensor
+        digitalWrite(TEMP_SENSOR_FET, HIGH);
+        delay(20);
         tempSensor.requestTemperaturesByIndex(0);
         float temp = tempSensor.getTempCByIndex(0);
-
-        // Read TDS sensor
-        int tdsRawValue = analogRead(TDS_SENSOR_PIN);
-        int tds = map(tdsRawValue, 0, 1023, 0, 1000);  // Assuming a 0-1000 TDS range, adjust as needed
+        digitalWrite(TEMP_SENSOR_FET, LOW);
+        delay(20);
 
         // Read pH sensor
-        float voltage = analogRead(PH_SENSOR_PIN) / 4096.0 * 3300.0;  // Assuming a 0-5V input range, adjust as needed
+        digitalWrite(PH_SENSOR_FET, HIGH);
+        delay(20);
+        float voltage = analogRead(PH_SENSOR_PIN) / 4096.0 * 3300.0;  // 
         float ph = phSensor.readPH(voltage, temp);
+        digitalWrite(PH_SENSOR_FET, LOW);
+        delay(20);
+
+        // Read TDS sensor
+        digitalWrite(TDS_SENSOR_FET, HIGH);
+        delay(20);
+        float tds = readTDSTask(temp);
+        digitalWrite(TDS_SENSOR_FET, LOW);
+        delay(20);
 
         // Lock the mutex only during updating shared variables
         xSemaphoreTake(mutexSharedVars, portMAX_DELAY);
@@ -132,39 +167,42 @@ void readSensorTask() {
 }
 
 // Task function to print sensor values
-void printSensorTask() {
+void printSensorTask(void* pvParameters) {
     while (1) {
+        xSemaphoreTake(mutexSharedVars, portMAX_DELAY);
+        String printTemp = temperature;
+        String printTDS = tdsValue;
+        String printPH = phValue;
+        xSemaphoreGive(mutexSharedVars);
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("TMP:");
+        lcd.print(printTemp);
+        lcd.print("TDS:");
+        lcd.print(printTDS);
+        lcd.setCursor(0, 1);
+        lcd.print("PH:");
+        lcd.print(printPH);
+
         DateTime currentTime = realTimeClock.now();
         unsigned long elapsedSeconds = currentTime.unixtime() - lastModification.unixtime();
-        float temp;
-        int tds;
-        float ph;
         if (Serial.available() > 0 && elapsedSeconds > MIX_TIME) {
-            xSemaphoreTake(mutexSharedVars, portMAX_DELAY);
-            temp = temperature;
-            tds = tdsValue;
-            ph = phValue;
-            xSemaphoreGive(mutexSharedVars);
-
+            sprintf(buffer, "///*%s*%s*%s*%i///", printTemp, PrintTDS, printPH, 0);
+            Serial.println(buffer);
         }
         else if ((Serial.available() > 0 && elapsedSeconds < MIX_TIME)) {
             // Lock the mutex only during accessing shared variables
             xSemaphoreTake(mutexDelayedVars, portMAX_DELAY);
-            temp = temperatureDelayed;
-            tds = tdsValueDelayed;
-            ph = phValueDelayed;
+            String printTempDelayed = temperatureDelayed;
+            String printTDSDelayed = tdsValueDelayed;
+            String printPHDelayed = phValueDelayed;
             xSemaphoreGive(mutexDelayedVars);
+            sprintf(buffer, "///*%s*%s*%s*%i///", printTempDelayed, PrintTDSDelayed, printPHDelayed, 1);
+            Serial.println(buffer);
         }
         else {
             return;
         }
-        // Print sensor values
-        Serial.print("Temperature: ");
-        Serial.println(temp);
-        Serial.print("TDS Value: ");
-        Serial.println(tds);
-        Serial.print("pH Value: ");
-        Serial.println(ph);
 
         vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1000ms (1 second)
     }
@@ -239,6 +277,7 @@ void modifyPHLevelTask(void* pvParameters) {
 }
 
 void setDelayedVariables() {
+    //taking semaphores
     xSemaphoreTake(mutexSharedVars, portMAX_DELAY);
     xSemaphoreTake(mutexDelayedVars, portMAX_DELAY);
     temperatureDelayed = temperature;
@@ -248,7 +287,7 @@ void setDelayedVariables() {
     xSemaphoreGive(mutexSharedVars);
 }
 
-float readTDSTask() {
+float readTDSTask(float givenTemp) {
     const int numReadings = 10;
     const float conversionFactor = 3.3 / 4096;
     const float temperatureCoefficient = 0.02;
@@ -257,7 +296,7 @@ float readTDSTask() {
 
     // Read TDS sensor
     for (int i = 0; i < numReadings; i++) {
-        analogTotal += analogRead(TdsSensorPin);
+        analogTotal += analogRead(TDS_SENSOR_PIN);
         delay(20); // Consider using an alternative delay for non-ESP32 platforms. 
     }
 
@@ -265,34 +304,12 @@ float readTDSTask() {
     float averageVoltage = averageReading * conversionFactor;
 
     // Temperature compensation
-    float compensation = 1.0 + temperatureCoefficient * (temperature - 25.0);
+    float compensation = 1.0 + temperatureCoefficient * (givenTemp - 25.0);
     float compensationVoltage = averageVoltage / compensation;
 
     // TDS calculation
     float tdsReading = (133.42 * pow(compensationVoltage, 3) - 255.86 * pow(compensationVoltage, 2) + 857.39 * compensationVoltage) * 0.5;
 
     return tdsReading;
-}
-
-float readPHTask() {
-    const int numReadings = 10;
-    const float conversionFactor = 3.3 / 4096;
-    const float temperatureCoefficient = 0.02;
-
-    float analogTotal = 0.0;
-
-    for (int i = 0; i < numReadings; i++) {
-        analogTotal += analogRead(PH_SENSOR_PIN);
-        delay(20); // Consider using an alternative delay for non-ESP32 platforms. 
-    }
-    // PH calculation
-    float averageReading = analogTotal / numReadings;
-    float pHReading = averageReading * conversionFactor;
-
-    
-    return  pHReading;
-
-
-
 }
 

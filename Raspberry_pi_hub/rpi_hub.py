@@ -50,11 +50,8 @@ class HydroStation():
         self.detector = detection_engine_tfl.detection_engine(coral_tpu=False)
         self.serial_connection = serial.Serial(usb_dir, baudrate=9600, parity=serial.PARITY_NONE,
                                                stopbits=serial.STOPBITS_ONE)
-        self.serial_buffer = [0.0, 0.0, 0.0, 0.0]  # Initialize serial_buffer
-        self.error_counts = {"sensor": 0,"image": 0,"overtime": 0,}
-        self.image = None
-        self.detection_results = None
-        self.sensor_results = None
+        self.error_counts = {"connection": 0,"sensor": 0,"image": 0,}
+        self.error_flag = {"connection": "SAFE","sensor": "SAFE","image": "SAFE",}
         #self.image_sender = streaming_sender.image_pub
     
     def __del__(self):
@@ -62,71 +59,84 @@ class HydroStation():
         GPIO.cleanup()
         
     def ImageDetection(self):
-        self.image = self.cam.capture_image()
+        image = self.cam.capture_image()
         rgb_image = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
-        self.detection_results = self.detector.run_inference(rgb_image)
+        return self.detector.run_inference(rgb_image)
         
     def PrimaryLoop(self):
         while True:
-            log_entry = []
-            self.ImageDetection()
-            self.sensor_results = self.GetSensorData()
-            if self.error_flag[0] == error_states["SAFE"]:
-                error_status_sensor = self.CheckSensorError()
-                log_entry.append(error_status_sensor)  # Append error status
-            elif self.error_flag[0] == error_states["ERROR"]:
-                log_entry.append(self.sensor_results)
-            inference_status = self.CheckImageError(self.detection_results)
-            log_entry.append(inference_status)  # Append inference status
-            if log_entry[0] == error_states["SAFE"] and log_entry[1] == error_states["SAFE"]:
-                self.ErrorCount(error_states["SAFE"])
-            else:
-                self.ErrorCount(error_states["ERROR"])
-            self.LogRecord(log_entry)
-            GPIO.output(alert_led, GPIO.HIGH)
-
-    def LogRecord(self, log):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        with open(log_dir, "a") as writer:  # Use "a" to append log entries
-            writer.write(f"{timestamp}, {', '.join(log)}\n")
-
-    def ErrorCount(self, state):
-        if state == error_states["SAFE"] and self.error_over_time == 0:
-            self.error_tally = 0
-        elif state == error_states["SAFE"] and self.error_over_time != 0:
-            self.error_tally = 0
-            self.error_over_time -= 1  # Decrement error_over_time
-        else:
-            self.error_over_time += 1  # Increment error_over_time
-            self.error_tally += 1
-        if self.error_over_time > error_overtime_max or self.error_tally == error_tally_max:
+            image_result = self.ImageDetection() # runs inferences
+            sensor_buffer = self.GetSensorData() # gets sensor info
+            if self.error_flag["connection"] == "SAFE": # if connection to sensor unit is fine, checks if value is fine
+                self.CheckSensorError()  
+            elif self.error_flag["connection"] == "ERROR":
+                self.error_flag["sensor"] = "ERROR"
+            self.CheckImageError(image_result)
+            if sensor_buffer[3] == 1:
+                self.ErrorAddition()
+                self.AlertUserCheck()
+            self.LogRecord(sensor_buffer, image_result)
+            self.error_flag = {"connection": "SAFE","sensor": "SAFE","image": "SAFE",}
+    
+    def AlertUserCheck(self):
+        if self.error_count["sensor"] > 15 or error_count["connection"] > 15 or self.error_count["image"] > 15:
             self.SendAlert()
+
+    def LogRecord(self, sen_data, infer_data):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        log = ("{} - sensors:{},{},{}, inferdata:{} error flags:{},{},{}".format(timestamp,sen_data[0],sen_data[1],sen_data[2], sen_data[3],infer_data, self.error_flag))
+        with open(log_dir, "a") as writer:  # Use "a" to append log entries
+            writer.write(log)
+
+    def ErrorAddition(self, state):
+        if state == self.error_flag["sensor"] = "ERROR":
+            self.error_count["sensor"] = self.error_count.get("sensor") + 1
+        elif state == self.error_flag["sensor"] = "SAFE" and self.error_count.get("sensor") > 0:
+            self.error_count["sensor"] = self.error_count.get("sensor") - 1
+        elif state == self.error_flag["sensor"] = "SAFE" and self.error_count.get("sensor") = 0:
+            self.error_count["sensor"] = self.error_count.get("sensor")
+
+        if state == self.error_flag["connection"] = "ERROR":
+            self.error_count["connection"] = self.error_count.get("connection") + 1
+        elif state == self.error_flag["connection"] = "SAFE" and self.error_count.get("connection") > 0:
+            self.error_count["connection"] = self.error_count.get("connection") - 1
+        elif state == self.error_flag["connection"] = "SAFE" and self.error_count.get("connection") = 0:
+            self.error_count["connection"] = self.error_count.get("connection")
+
+        if state == self.error_flag["image"] = "ERROR":
+            self.error_count["image"] = self.error_count.get("image") + 1
+        elif state == self.error_flag["image"] = "SAFE" and self.error_count.get("image") > 0:
+            self.error_count["image"] = self.error_count.get("image") - 1
+        elif state == self.error_flag["image"] = "SAFE" and self.error_count.get("image") = 0:
+            self.error_count["image"] = self.error_count.get("image")
+
+
             
-    def CheckSensorError(self):
-        if tds_upper < self.serial_buffer[1] < tds_lower:
-            return error_states["SAFE"]
-        elif temp_lower < self.serial_buffer[0] < temp_upper:
-            return error_states["SAFE"]
-        elif ph_lower < self.serial_buffer[2] < ph_upper:
-            return error_states["SAFE"]
-        else:
-            return error_states["ERROR"]
+    def CheckSensorError(self, sensor_data):
+        if sensor_data[0] < temp_lower or temp_upper <  sensor_data[0]:
+            self.error_flag["sensor"] = "ERROR"
+        if  sensor_data[1] < tds_lower or  sensor_data[1] < tds_upper:
+            self.error_flag["sensor"] = "ERROR"
+        if  sensor_data[2] < ph_lower or  sensor_data[2] < ph_upper:
+            self.error_flag["sensor"] = "ERROR"
         
     def CheckImageError(self, inference_results):
         if any(x in error_tags for x in inference_results):
-            self.error_flag[1] = 1
-            return "error_image"
+            self.error_flag["image"] = "ERROR"
         elif not inference_results:
-            self.error_flag[1] = 1
-            return "error_image"
-        else:
-            return error_states["SAFE"]
+            self.error_flag["image"] = "ERROR"
         
     def GetSensorData(self):
         self.RequestReading()
+        time_elasped = 0
         while self.serial_connection.in_waiting == 0:
             time.sleep(0.2)
-        return self.ReadReply()
+            time_elasped = time_elasped + 0.2
+            if time_elasped > 60:
+                self.error_flag["connection"] = "ERROR"
+                return 0
+        return self.readReply()
+    
         
     def RequestReading(self):
         self.serial_connection.write(default_request.encode())  # Convert string to bytes
@@ -134,18 +144,21 @@ class HydroStation():
     def ReadReply(self):
         message = self.serial_connection.readline().decode().strip()  # Decode bytes to string
         sensor_readings = message.split("*")
+        temp_buffer = []
         if sensor_readings[0] != "///":
-            self.error_flag[0] = 1
-            return "error_handshake"
+            self.error_flag["connection"] = "ERROR"
+            return 0
         try:
-            for i in range(3):
-                self.serial_buffer[i] = float(sensor_readings[i + 1])
-            return error_states["SAFE"]
+            for i in range(4):
+                temp_buffer[i] = float(sensor_readings[i + 1])
+            self.error_flag["connection"] = "SAFE"
+            return temp_buffer
         except ValueError:
-            self.error_flag[0] = 1
-            return "error_valuetype"
+            self.error_flag["connection"] = "ERROR"
+            return 0
                 
     def SendAlert(self):
+        self.error_counts = {"connection": 0,"sensor": 0,"image": 0,}
         headers = [
             "From: " + gmail_username,
             "Subject: Hydroponic system ALERT",
